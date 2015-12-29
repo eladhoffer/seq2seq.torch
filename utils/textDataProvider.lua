@@ -28,6 +28,41 @@ function loadTextFileWords(filename, vocab)
     return wordsVec, vocab, decoder
 end
 
+function loadTextLines(filename, vocab)
+    local tds = require 'tds'
+    local file = io.open(filename, 'r')
+    local vector = tds.Vec()
+
+    local vocab = vocab or {}
+    local currentNum = 1
+    --count num words (in case of existing vocab)
+    for _ in pairs(vocab) do currentNum = currentNum + 1 end
+
+
+    for line in file:lines() do
+      local words = line:split(' ')
+      local length = #words
+      local wordsVec = torch.LongTensor(#words):zero()
+
+      for i=1, length do
+          local currWord = words[i]
+          local encodedNum = vocab[currWord]
+          if not encodedNum then
+            vocab[currWord] = currentNum
+            encodedNum = currentNum
+            currentNum = currentNum + 1
+          end
+          wordsVec[i] = encodedNum
+      end
+      vector:insert(wordsVec)
+    end
+
+    local decoder = {}
+    for word, num in pairs(vocab) do
+        decoder[num] = word
+    end
+    return vector, vocab, decoder
+end
 function loadTextFileChars(filename, vocab)
   local file = torch.DiskFile(filename, 'r')
   file:seekEnd()
