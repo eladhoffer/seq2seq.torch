@@ -28,15 +28,22 @@ function loadTextFileWords(filename, vocab)
     return wordsVec, vocab, decoder
 end
 
-function loadTextLines(filename, vocab)
+function loadTextLines(filename, defaultTokens)
+    local vocabSizeLimit = 1e8
+    local vocabFreq = torch.LongTensor(vocabSizeLimit):zero()
     local tds = require 'tds'
     local file = io.open(filename, 'r')
     local vector = tds.Vec()
 
-    local vocab = vocab or {}
+    local defaultTokens = defaultTokens or {}
+    local vocab = {}
     local currentNum = 1
     --count num words (in case of existing vocab)
-    for _ in pairs(vocab) do currentNum = currentNum + 1 end
+    for num,token in pairs(defaultTokens) do
+      vocab[token] = num
+      vocabFreq[num] = math.huge
+      currentNum = currentNum + 1
+    end
 
 
     for line in file:lines() do
@@ -52,14 +59,27 @@ function loadTextLines(filename, vocab)
             encodedNum = currentNum
             currentNum = currentNum + 1
           end
+          vocabFreq[encodedNum] = vocabFreq[encodedNum] + 1
           wordsVec[i] = encodedNum
       end
       vector:insert(wordsVec)
     end
 
+    vocabFreq = vocabFreq:narrow(1, currentNum - 1)
+    local sortedIdxs
+    vocabFreq, sortedIdxs = vocabFreq:sort(1, true)
+    local newIdxs = torch.LongTensor():range(1, currentNum - 1):index(1, sortedIdxs)
+
+    for _, v in pairs(vector) do
+      for i=1, v:size(1) do
+        v[i] = newIdxs[v[i]]
+      end
+    end
+
     local decoder = {}
     for word, num in pairs(vocab) do
-        decoder[num] = word
+        vocab[token] = newIdxs[num]
+        decoder[newIdxs[num]] = word
     end
     return vector, vocab, decoder
 end
