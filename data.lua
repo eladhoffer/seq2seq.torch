@@ -1,10 +1,14 @@
+local tds = require 'tds'
+local tokens = {'<UNK>', '<EOS>', '<GO>', '<PAD>'}
+
+
 
 local function decodeFunc(decoder, seperator)
   local seperator = seperator or ' '
   local func = function(vec)
     local output = ''
     for i=1, vec:size(1) do
-      output = output .. space .. decoder[vec[i]]
+      output = output .. seperator .. decoder[vec[i]]
     end
     return output
   end
@@ -16,7 +20,7 @@ local function encodeFunc(vocab, missingVal)
   local func = function(str)
     local words = str:split(' ')
     local length = #words
-    local encoded = torch.LongTensor(#words):zero()
+    local encoded = torch.IntTensor(#words):zero()
 
     for i=1, length do
       local currWord = words[i]
@@ -32,7 +36,9 @@ local function encodeFunc(vocab, missingVal)
   return func
 end
 
-function loadTextLines(filename, defaultTokens)
+function loadTextLines(filename, defaultTokens, minLength, maxLength)
+  local minLength = minLength or 1
+  local maxLength = maxLength or 50
   local vocabSizeLimit = 2^31 - 1 --integer limit
   local removedSymbols = '[\n,"?.!/\\<>():;]'
   local vocabFreq = torch.IntTensor(vocabSizeLimit):zero()
@@ -56,7 +62,7 @@ function loadTextLines(filename, defaultTokens)
     line = line:gsub('%s+',' '):gsub('%s$',''):gsub("'s", " 's"):lower()
     local words = line:split(' ')
     local length = #words
-    if length > 0 then
+    if length > minLength and length < maxLength then
       local wordsVec = torch.IntTensor(#words):zero()
 
       for i=1, length do
@@ -99,15 +105,36 @@ function loadTextLines(filename, defaultTokens)
     vocab = vocab,
     decodeTable = decodeTable,
     decodeFunc = decodeFunc(decodeTable),
-    encodeFunc = encodeFunc(vocab, vocab['<UNK>']),
-    count = count
+    encodeFunc = encodeFunc(vocab),
+    count = vocabFreq
   }
   return data
 end
 
-function reduceNumWords(sentences, num)
-  for _, v in pairs(vector) do
-    v:clamp(-1, num)
+function reduceNumWords(sentences, num, replaceWith)
+  for _, v in pairs(sentences) do
+    for i=1, v:size(1) do
+      if v[i] > num then
+        v[i] = replaceWith
+      end
+    end
   end
-return sentences
+  return sentences
 end
+
+
+local dataFolder = '../../Datasets/training-monolingual/'
+local cacheFolder = './cache/'
+sys.execute('mkdir -p ' .. cacheFolder)
+
+local filename = 'news-commentary-v6.en'--'europarl-v6.en'
+local cacheFilename = cacheFolder .. filename .. '_cached.t7'
+
+local data
+if paths.filep(cacheFilename) then
+  data = torch.load(cacheFilename)
+else
+  data = loadTextLines(dataFolder .. filename ,tokens)
+  torch.save(cacheFilename, data)
+end
+return data
