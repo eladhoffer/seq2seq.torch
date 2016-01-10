@@ -9,7 +9,6 @@ local netFilename = paths.concat(opt.save, 'Net')
 local vocabSize = data.vocabSize
 local vocab = data.vocab
 local decoder = data.decodeTable
-local decode = data.decodeFunc
 
 
 local recurrentEncoder = modelConfig.recurrentEncoder
@@ -23,14 +22,13 @@ local criterion = nn.CrossEntropyCriterion()
 
 
 local TensorType = 'torch.FloatTensor'
-local model = nn.Sequential():add(embedder):add(recurrentEncoder):add(recurrentDecoder):add(classifier)
 
 if opt.type =='cuda' then
   require 'cutorch'
   require 'cunn'
   cutorch.setDevice(opt.devid)
   cutorch.manualSeed(opt.seed)
-  model:cuda()
+  --model:cuda()
   criterion = criterion:cuda()
   TensorType = 'torch.CudaTensor'
 end
@@ -39,7 +37,13 @@ end
 local seqCriterion = nn.TemporalCriterion(criterion)
 
 -- Optimization configuration
-local Weights,Gradients = model:getParameters()
+local optimState = {
+    learningRate = opt.LR,
+    momentum = opt.momentum,
+    weightDecay = opt.weightDecay,
+    learningRateDecay = opt.LRDecay
+}
+
 
 local savedModel = {
   embedder = embedder:clone('weight','bias', 'running_mean', 'running_std'),
@@ -74,6 +78,34 @@ function saveModel(epoch)
     decoder = decoder
   })
   collectgarbage()
+end
+
+local function lossGradNoPadding(criterion, y, yt, padToken)
+  local grad = y.new():resizeAs(y):zero()
+  for i = 1, y:size(1) do
+    for j = 1, y:size(2) do
+      if yt[i][j] == padToken then break end
+      grad[i][j]:copy(criterion:backward(y[i][j], yt[i][j]))
+    end
+  end
+  grad:div(y:size(1))
+  return grad
+end
+
+local function lossNoPadding(criterion, y, yt, padToken)
+  local loss = 0
+  for i = 1, y:size(1) do
+    local currLength = 1
+    local currLoss = 0
+    for j = 1, y:size(2) do
+      if yt[i][j] == padToken then break end
+      currLoss = currLoss + criterion:forward(y[i][j], yt[i][j])
+      currLength = currLength + 1
+    end
+    loss = loss + currLoss / currLength
+  end
+  loss = loss / y:size(1)
+  return loss
 end
 
 ----------------------------------------------------------------------
@@ -162,18 +194,23 @@ function seq2seq(encoderTbl, ...)
     for m = 1, #decoderModels do
       decoderModels[m]:setState(state)
       x[m], yt[m] = getNextBatch(m)
+
       y[m] = decoderModels[m]:forward(x[m])
-      currLoss = seqCriterion:forward(y[m], yt[m])
-      print(torch.exp(currLoss / opt.seqLength))
-      lossVals[m] = lossVals[m] + currLoss / opt.seqLength
+      currLoss = lossNoPadding(criterion, y[m], yt[m], decoderVocabs[m]['<PAD>'])
+    --  print(torch.exp(currLoss))
+      lossVals[m] = lossVals[m] + currLoss --/ opt.seqLength
+      seqCriterion:forward(y[m],yt[m])
+
     end
     ----Training -> backpropagation
     if train then
       local f_eval = function()
         encoderModel:zeroGradParameters()
         encoderModel:zeroGradState()
+
         for m = 1, #decoderModels do
           decoderModels[m]:zeroGradParameters()
+          decoderModels[m]:zeroGradState()
 
           local dE_dy = seqCriterion:backward(y[m],yt[m])
           decoderModels[m]:backward(x[m], dE_dy)
@@ -200,15 +237,25 @@ function seq2seq(encoderTbl, ...)
   collectgarbage()
   xlua.progress(numSamples, #inputData)
   lossVals:div(numBatches)
-  return lossVals
+  return lossVals:mean()
 end
 ------------------------------
 
+function train(dataVec)
+  model:training()
+  return ForwardSeq(dataVec, true)
+end
+
+function evaluate(dataVec)
+  model:evaluate()
+  return ForwardSeq(dataVec, false)
+end
 
 function sample(encoderTbl, decoderTbl, str)
   local num = #str:split(' ')
   local encoderModel, encodeFunc = unpack(encoderTbl)
   local decoderModel, decodeFunc = unpack(decoderTbl)
+  local padToken = encodeFunc('<PAD>'):squeeze()
   encoderModel:zeroState()
   encoderModel:sequence()
   decoderModel:single()
@@ -218,10 +265,12 @@ function sample(encoderTbl, decoderTbl, str)
   local encoded = encodeFunc(str)
   print('\nOriginal:\n' .. decodeFunc(encoded))
   encoderModel:forward(encoded:view(1, -1))
+  wordNum = encodeFunc('<GO>')
+  pred = decoderModel:forward(wordNum)
   decoderModel:setState(encoderModel:getState())
-  wordNum = encodeFunc('<NS>')
   for i=1, num do
     pred = decoderModel:forward(wordNum)
+    pred:select(2, padToken):zero()
     _, wordNum = pred:max(2)
     wordNum = wordNum[1]
     predText = predText .. ' ' .. decodeFunc(wordNum)

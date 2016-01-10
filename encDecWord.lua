@@ -99,10 +99,15 @@ else
     --  modelConfig.classifier = nn.TemporalConvolution(opt.rnnSize, vocabSize, 1)
 end
 
-modelConfig.embedder:cuda()
+local model = nn.Sequential():add(modelConfig.embedder):add(modelConfig.recurrentEncoder):add(modelConfig.recurrentDecoder):add(modelConfig.classifier)
+model:cuda()
+ Weights,Gradients = model:getParameters()
+
 local enc = nn.Sequential():add(modelConfig.embedder):add(nn.Reverse(2):cuda()):add(modelConfig.recurrentEncoder)
 local dec = nn.Sequential():add(modelConfig.embedder:clone('weight','gradWeight'))
 dec:add(modelConfig.recurrentDecoder):add(nn.TemporalModule(modelConfig.classifier))
+ decode = data.decodeFunc
+
 local trainingConfig = require 'utils.trainEncDec'
 print(enc)
 
@@ -111,43 +116,45 @@ local log = optim.Logger(logFilename)
 local decreaseLR = EarlyStop(1,opt.epochDecay)
 local stopTraining = EarlyStop(opt.earlyStop, opt.epoch)
 local epoch = 1
-local sampledDec = nn.Sequential():add(modelConfig.embedder):add(modelConfig.recurrentDecoder):add(modelConfig.classifier)
+local sampledDec = nn.Sequential():add(modelConfig.embedder):add(modelConfig.recurrentDecoder):add(modelConfig.classifier):add(nn.SoftMax())
+
 repeat
     print('\nEpoch ' .. epoch ..'\n')
     --print('\nSampled Text:\n' .. sample('once again the specialists were not able to handle the imbalances on the floor of the new york stock exchange'))
     --print('\nSampled Text:\n' .. sample('a form of asbestos once used to make kent cigarette filters has caused a high percentage of cancer deaths among a group of workers'))
     --print('\nSampled Text:\n' .. sample("the following were among yesterday 's offerings and pricings in the u.s. and non-u.s. capital markets"))
     --print('\nSampled Text:\n' .. sample('closely held central diagnostic laboratory inc. in a cash and securities transaction valued at $ N million'))
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'two weeks ago viewers started calling a  number for advice on various issues'))
     --LossTrain = train(data.trainingData)
     LossTrain = seq2seq({data.sentences, enc, data.vocab},{data.sentences, dec, data.vocab})
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'nothing could be further from the truth'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'two weeks ago viewers started calling a number for advice on various issues'))
     saveModel(epoch)
     if opt.optState then
         torch.save(optStateFilename .. '_epoch_' .. epoch .. '.t7', optimState)
     end
     print('\nTraining Perplexity: ' .. torch.exp(LossTrain))
 
-    local LossVal = evaluate(data.validationData)
+    --local LossVal = evaluate(data.validationData)
 
-    print('\nValidation Perplexity: ' .. torch.exp(LossVal))
+    --print('\nValidation Perplexity: ' .. torch.exp(LossVal))
 
-    local LossTest = evaluate(data.testData)
+    --local LossTest = evaluate(data.testData)
 
 
-    print('\nTest Perplexity: ' .. torch.exp(LossTest))
-    log:add{['Training Loss']= LossTrain, ['Validation Loss'] = LossVal, ['Test Loss'] = LossTest}
-    log:style{['Training Loss'] = '-', ['Validation Loss'] = '-', ['Test Loss'] = '-'}
-    log:plot()
-    epoch = epoch + 1
+    --print('\nTest Perplexity: ' .. torch.exp(LossTest))
+    --log:add{['Training Loss']= LossTrain, ['Validation Loss'] = LossVal, ['Test Loss'] = LossTest}
+    --log:style{['Training Loss'] = '-', ['Validation Loss'] = '-', ['Test Loss'] = '-'}
+    --log:plot()
+    --epoch = epoch + 1
 
-    if decreaseLR:update(LossVal) then
-        optimState.learningRate = optimState.learningRate / opt.decayRate
-        print("Learning Rate decreased to: " .. optimState.learningRate)
-        decreaseLR = EarlyStop(1,1)
-        decreaseLR:reset()
-    end
+    --if decreaseLR:update(LossVal) then
+    --    optimState.learningRate = optimState.learningRate / opt.decayRate
+    --    print("Learning Rate decreased to: " .. optimState.learningRate)
+    --    decreaseLR = EarlyStop(1,1)
+    --    decreaseLR:reset()
+    --end
 
-until stopTraining:update(LossVal)
+until false--stopTraining:update(LossVal)
 
 local lowestLoss, bestIteration = stopTraining:lowest()
 
