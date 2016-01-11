@@ -27,11 +27,11 @@ function seq2seq:__init(...)
 end
 
 function seq2seq:flattenParameters()
-  local tmpModel = nn.Sequential():add(self.encoderModel)
+  self.allModules = nn.Sequential():add(self.encoderModel)
   for _, m in pairs(self.decoderModels) do
-    tmpModel:add(m)
+    self.allModules:add(m)
   end
-  self.weights, self.gradients = tmpModel:getParameters()
+  self.weights, self.gradients = self.allModules:getParameters()
 end
 
 function seq2seq:type(type)
@@ -61,6 +61,33 @@ function seq2seq:addDecoder(model, data, vocab)
   self.decoderVocabs[num] = vocab
   return self
 end
+
+function seq2seq:training()
+  self.train = true
+  self.allModules:training()
+end
+
+function seq2seq:forward(input)
+  --input is a table of {input, decOutput1, decOutput2, ...}
+  local xE = table.remove(input, 1)
+  local xDs = input
+  self.allModules:sequence()
+  self.allModules:forget()
+  self.allModules:setIterations(self.maxLength)
+
+  self.encoderModel:zeroState()
+  local out = self.encoderModel:forward(xE)
+  local state = self.encoderModel:getState()
+
+  for m = 1, #decoderModels do
+    self.decoderModels[m]:setState(state)
+    y[m] = self.decoderModels[m]:forward(x[m])
+    currLoss = lossNoPadding(criterion, y[m], yt[m], self.decoderVocabs[m]['<PAD>'])
+    --  print(torch.exp(currLoss))
+    lossVals[m] = lossVals[m] + currLoss --/ opt.seqLength
+    seqCriterion:forward(y[m],yt[m])
+
+  end
 
 ----------------------------------------------------------------------
 function seq2seq:train()

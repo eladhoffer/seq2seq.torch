@@ -116,7 +116,7 @@ local log = optim.Logger(logFilename)
 local decreaseLR = EarlyStop(1,opt.epochDecay)
 local stopTraining = EarlyStop(opt.earlyStop, opt.epoch)
 local epoch = 1
-local sampledDec = nn.Sequential():add(modelConfig.embedder):add(modelConfig.recurrentDecoder):add(modelConfig.classifier):add(nn.SoftMax())
+local sampledDec = nn.Sequential():add(modelConfig.embedder):add(modelConfig.recurrentDecoder):add(modelConfig.classifier):add(nn.SoftMax():cuda())
 
 repeat
     print('\nEpoch ' .. epoch ..'\n')
