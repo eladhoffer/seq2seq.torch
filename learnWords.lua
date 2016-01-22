@@ -3,7 +3,7 @@ require 'nn'
 require 'optim'
 require 'recurrent'
 require 'eladtools'
-require 'seqProvider'
+local tds = require 'tds'
 -------------------------------------------------------
 
 cmd = torch.CmdLine()
@@ -20,7 +20,6 @@ cmd:text('===>Model And Training Regime')
 cmd:option('-model',              'LSTM',                      'Recurrent model [RNN, iRNN, LSTM, GRU]')
 cmd:option('-seqLength',          50,                          'number of timesteps to unroll for')
 cmd:option('-rnnSize',            128,                         'size of rnn hidden layer')
-cmd:option('-embeddingSize',      128,                          'size of word embedding')
 cmd:option('-numLayers',          1,                           'number of layers in the LSTM')
 cmd:option('-dropout',            0,                           'dropout p value')
 cmd:option('-LR',                 1e-3,                        'learning rate')
@@ -66,14 +65,11 @@ local netFilename = paths.concat(opt.save, 'Net')
 local logFilename = paths.concat(opt.save,'LossRate.log')
 local log = optim.Logger(logFilename)
 ----------------------------------------------------------------------
-local data = require 'data'
+local data = torch.load('./cache/ptb_cached.t7')
 local decoder = data.decodeTable
 local vocab = data.vocab
 local decode = data.decodeFunc
-local vocabSize = math.min(#decoder, 50000)
-if vocabSize < #decoder then
-    reduceNumWords(data.sentences, vocabSize, data.vocab['<UNK>'])
-end
+local vocabSize = #decoder
 ----------------------------------------------------------------------
 -- Model + Loss:
 
@@ -83,7 +79,7 @@ if paths.filep(opt.load) then
 else
     local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
     local rnn = rnnTypes[opt.model]
-    local hiddenSize = opt.embeddingSize
+    local hiddenSize = vocabSize
     recurrentEncoder = nn.Sequential()
     for i=1, opt.numLayers do
         recurrentEncoder:add(rnn(hiddenSize, opt.rnnSize, opt.initWeight))
@@ -94,13 +90,9 @@ else
     end
     recurrentDecoder = recurrentEncoder:clone()
     recurrentDecoder:reset()
-    embedder = nn.LookupTable(vocabSize, opt.embeddingSize)
+    require 'utils.OneHot'
+    embedder = nn.OneHot(vocabSize, vocab['<PAD>'])--nn.LookupTable(vocabSize, vocabSize)
     classifier = nn.Linear(opt.rnnSize, vocabSize)
-end
-
-embedder.updateOutput = function(...) --used to ensure padding is a zeros vector
-  embedder.weight[vocab['<PAD>']]:zero()
-  return nn.LookupTable.updateOutput(...)
 end
 
 local criterion = nn.CrossEntropyCriterion()
@@ -175,8 +167,6 @@ function saveModel(epoch)
     recurrentEncoder = savedModel.recurrentEncoder:clone():float(),
     recurrentDecoder = savedModel.recurrentDecoder:clone():float(),
     classifier = savedModel.classifier:clone():float(),
-    inputSize = inputSize,
-    stateSize = stateSize,
     vocab = vocab,
     decoder = decoder
   })
@@ -199,20 +189,13 @@ local function lossNoPadding(criterion, y, yt, padToken)
     return loss
 end
 
-
-
 ----------------------------------------------------------------------
   function seq2seq(encoderTbl, decoderTbls, train)
     -- input is of form {data, model, vocab}, {data, model, vocab},...
     -- data is ordered batches X batchSize X smpLength
     local maxLength = 50
-
     local inputData, encoderModel, encoderVocab = unpack(encoderTbl)
-    local encodedSeqs = seqProvider{
-      data = inputData, maxLength = maxLength,
-      padding = encoderVocab['<PAD>'], type= TensorType
-    }
-
+    local xE = torch.Tensor(opt.batchSize, maxLength + 2):type(TensorType)
     if train then
       encoderModel:training()
     else
@@ -221,37 +204,77 @@ end
     encoderModel:sequence()
     encoderModel:forget()
     encoderModel:setIterations(maxLength)
+    local outputData = {}
     local decoderModels = {}
-    local decodedSeqs = {}
     local decoderVocabs = {}
+    local xDs = {}
+    local targets = {}
 
-    for m, decTbl in pairs(decoderTbls) do
-      local data, model, vocab = unpack(decTbl)
-      decoderModels[m], decoderVocabs[m] = model, vocab
-      decodedSeqs[m] = seqProvider{
-        data = data, maxLength = maxLength, type = TensorType,
-        padding = vocab['<PAD>'], startToken = vocab['<GO>'], endToken = vocab['<EOS>']
-      }
+    for num, decTbl in pairs(decoderTbls) do
+      outputData[num], decoderModels[num], decoderVocabs[num] = unpack(decTbl)
       if train then
-        decoderModels[m]:training()
+        decoderModels[num]:training()
       else
-        decoderModels[m]:evaluate()
+        decoderModels[num]:evaluate()
       end
-      decoderModels[m]:sequence()
-      decoderModels[m]:forget()
-      decoderModels[m]:setIterations(maxLength)
+      decoderModels[num]:sequence()
+      decoderModels[num]:forget()
+      decoderModels[num]:setIterations(maxLength)
+      xDs[num] = torch.Tensor(opt.batchSize , maxLength + 1):type(TensorType)
     end
     local numBatches = math.floor(#inputData / opt.batchSize)
     local numSamples = 1
     local lossVals = torch.FloatTensor(#decoderModels):zero()
     local randIndexes = torch.LongTensor():randperm(#inputData)
 
+    function getNextBatch(numData) --0 for encoded data, otherwise num of decoded data
+      local vocab = encoderVocab
+      local data = inputData
+      local x = xE
+      if numData > 0 then
+        data = outputData[numData]
+        x = xDs[numData]
+        vocab = decoderVocabs[numData]
+      end
+      local padVal = vocab['<PAD>']
+      local eosVal = vocab['<EOS>']
+      local goVal = vocab['<GO>']
+      if numSamples + opt.batchSize > #data then
+        return nil
+      end
+      x:fill(padVal)
+
+      local currMaxLength = 0
+      for i = 1, opt.batchSize do
+        local idx = randIndexes[i + numSamples - 1]
+        local currSeq = data[idx]
+        local currLength = currSeq:nElement()
+        currMaxLength = math.max(currMaxLength, currLength)
+        if numData == 0 then --encoder
+          x[{i,{1, currLength}}]:copy(currSeq)
+        else
+          x[{i,{2, currLength + 1}}]:copy(currSeq)
+          x[{i, currLength + 2}] = eosVal
+          x[{i, 1}] = goVal
+        end
+      end
+      local target
+      if numData == 0 then --encoder
+        x = x:narrow(2, 1, currMaxLength)
+      else
+        target = x:narrow(2, 2, currMaxLength + 1):contiguous()
+        x = x:narrow(2, 1, currMaxLength + 1)
+      end
+      return x, target
+    end
+
+
     for b = 1, numBatches do
       local x = {}
       local yt = {}
       local y = {}
       local currLoss = 0
-      x[0] = encodedSeqs:getSequences(randIndexes:narrow(1, numSamples, opt.batchSize))
+      x[0] = getNextBatch(0)
       encoderModel:zeroState()
       local out = encoderModel:forward(x[0])
 
@@ -259,13 +282,11 @@ end
 
       for m = 1, #decoderModels do
         decoderModels[m]:setState(state)
-        local seq = decodedSeqs[m]:getSequences(randIndexes:narrow(1, numSamples, opt.batchSize))
-        x[m] = seq:sub(1,-1,1,-2)
-        yt[m] = seq:sub(1,-1,2,-1):contiguous()
+        x[m], yt[m] = getNextBatch(m)
 
         y[m] = decoderModels[m]:forward(x[m])
         currLoss = lossNoPadding(criterion, y[m], yt[m], decoderVocabs[m]['<PAD>'])
-      print(torch.exp(currLoss))
+  --     print(torch.exp(currLoss))
         lossVals[m] = lossVals[m] + currLoss --/ opt.seqLength
         seqCriterion:forward(y[m],yt[m])
 
@@ -312,10 +333,10 @@ end
 
 
 function sample(encoderTbl, decoderTbl, str)
-    local num = #str:split(' ')
+    local num = 50--#str--:split(' ')
     local encoderModel, encodeFunc = unpack(encoderTbl)
     local decoderModel, decodeFunc = unpack(decoderTbl)
-    local padToken = encodeFunc('<PAD>'):squeeze()
+    local padToken = vocab['<PAD>']
     encoderModel:zeroState()
     decoderModel:single()
     encoderModel:sequence()
@@ -325,7 +346,7 @@ function sample(encoderTbl, decoderTbl, str)
     predText = ''
     local encoded = encodeFunc(str):type(TensorType)
     print('\nOriginal:\n' .. decodeFunc(encoded))
-    wordNum = encodeFunc('<GO>'):type(TensorType)
+    wordNum = torch.Tensor({vocab['<GO>']}):type(TensorType)
     if encoded:nElement() == 1 then
       encoderModel:single()
     end
@@ -336,7 +357,7 @@ function sample(encoderTbl, decoderTbl, str)
         pred:select(2, padToken):zero()
         _, wordNum = pred:max(2)
         wordNum = wordNum[1]
-        if wordNum:squeeze() == encodeFunc('<EOS>'):squeeze() then
+        if wordNum:squeeze() == vocab['<EOS>'] then
           break
         end
         predText = predText .. ' ' .. decodeFunc(wordNum)
@@ -350,43 +371,23 @@ local sampledDec = nn.Sequential():add(embedder):add(recurrentDecoder):add(class
 local decreaseLR = EarlyStop(1,opt.epochDecay)
 local stopTraining = EarlyStop(opt.earlyStop, opt.epoch)
 local epoch = 1
-
 repeat
     print('\nEpoch ' .. epoch ..'\n')
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'once again the specialists were not able to handle the imbalances on the floor of the new york stock exchange'))
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'a form of asbestos once used to make kent cigarette filters has caused a high percentage of cancer deaths among a group of workers'))
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},"the following were among yesterday 's offerings and pricings in the u.s. and non-u.s. capital markets"))
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'nothing could be further from the truth'))
-    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec, data.decodeFunc},'two weeks ago viewers started calling a number for advice on various issues'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec,data.decodeFunc},'a'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec,data.decodeFunc},'b'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec,data.decodeFunc},'once'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec,data.decodeFunc},'cigarette'))
+    print('\nSampled Text:\n' .. sample({enc, data.encodeFunc}, {sampledDec,data.decodeFunc},"followings"))
     local LossTrain = seq2seq({data.sentences, enc, data.vocab},{{data.sentences, dec, data.vocab}}, true)
-
     saveModel(epoch)
     if opt.optState then
         torch.save(optStateFilename .. '_epoch_' .. epoch .. '.t7', optimState)
     end
     print('\nTraining Perplexity: ' .. torch.exp(LossTrain))
 
-    --local LossVal = evaluate(data.validationData)
-
-    --print('\nValidation Perplexity: ' .. torch.exp(LossVal))
-
-    --local LossTest = evaluate(data.testData)
-
-
-    --print('\nTest Perplexity: ' .. torch.exp(LossTest))
-    --log:add{['Training Loss']= LossTrain, ['Validation Loss'] = LossVal, ['Test Loss'] = LossTest}
-    --log:style{['Training Loss'] = '-', ['Validation Loss'] = '-', ['Test Loss'] = '-'}
-    --log:plot()
     epoch = epoch + 1
 
-    --if decreaseLR:update(LossVal) then
-    --    optimState.learningRate = optimState.learningRate / opt.decayRate
-    --    print("Learning Rate decreased to: " .. optimState.learningRate)
-    --    decreaseLR = EarlyStop(1,1)
-    --    decreaseLR:reset()
-    --end
-
-until false--stopTraining:update(LossVal)
+until false
 
 local lowestLoss, bestIteration = stopTraining:lowest()
 

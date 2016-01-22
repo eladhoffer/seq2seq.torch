@@ -1,13 +1,12 @@
 require 'nn'
-local OneHot, parent = torch.class('nn.OneHot', 'nn.Module')
+local MaskTarget, parent = torch.class('nn.MaskTarget', 'nn.Module')
 
-function OneHot:__init(outputSize, zeroOnNum)
+function MaskTarget:__init(maskedValue)
   parent.__init(self)
-  self.outputSize = outputSize
-  self.zeroOnNum = zeroOnNum
+  self.maskedValue = 0 or maskedValue
 end
 
-function OneHot:updateOutput(input)
+function MaskTarget:updateOutput(input, target)
   local input_ = input:contiguous()
   if input:dim() == 1 or input:size(2)>1 then
     input_ = input_:view(-1,1)
@@ -29,13 +28,13 @@ function OneHot:updateOutput(input)
   return self.output
 end
 
-function OneHot:clone(...)
+function MaskTarget:clone(...)
   local m = parent.clone(self, ...)
-  m.zeroOnNum = self.zeroOnNum
+  m.maskedValue = self.maskedValue
   return m
 end
 
-function OneHot:updateGradInput(input, gradOutput)
+function MaskTarget:updateGradInput(input, gradOutput)
   self.gradInput:resizeAs(input):zero()
   return self.gradInput
 end

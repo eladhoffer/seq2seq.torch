@@ -8,7 +8,8 @@ local function decodeFunc(decoder, seperator)
   local func = function(vec)
     local output = ''
     for i=1, vec:size(1) do
-      output = output .. seperator .. decoder[vec[i]]
+      local decoded = decoder[vec[i]] or '<UNK>'
+      output = output .. seperator .. decoded
     end
     return output
   end
