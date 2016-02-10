@@ -1,27 +1,40 @@
-local tds = require 'tds'
-local tokens = {'<UNK>', '<EOS>', '<GO>', '<PAD>'}
-
-
-
-local function decodeFunc(decoder, seperator)
-  local seperator = seperator or ' '
+local function createDecodeFunc(vocab)
+  local decoder = {}
+  for word,num in pairs(vocab) do
+    decoder[num] = word
+  end
   local func = function(vec)
-    local output = ''
-    for i=1, vec:size(1) do
-      local decoded = decoder[vec[i]] or '<UNK>'
-      output = output .. seperator .. decoded
+    local length
+    if torch.type(vec) == 'number' then
+      vec = {vec}
     end
-    return output
+    if torch.isTensor(vec) then length = vec:size(1)
+    else
+      length = #vec
+    end
+
+    local decoded = {}
+    for i=1, length do
+      decoded[i] = decoder[vec[i]]
+    end
+    return decoded
   end
   return func
 end
 
-local function encodeFunc(vocab, missingVal)
-  local missingVal = missingVal or -1
-  local func = function(str)
-    local words = str:split(' ')
+local function createEncodeFunc(vocab, tokenizer, buffer)
+  local func = function(missingVal, minLength, maxLength)
+    local minLength = minLength or 0
+    local maxLength = maxLength or 2^31 -1
+    local missingVal = missingVal or -1
+
+    local words = tokenizer(str)
     local length = #words
-    local encoded = torch.IntTensor(#words):zero()
+    if length < minLength or length > maxLength then
+      return nil
+    end
+    local encoded = buffer or torch.IntTensor(#words)
+    encoded:zero()
 
     for i=1, length do
       local currWord = words[i]
@@ -45,7 +58,7 @@ local function simpleTokenizer(sentence)
   return words
 end
 
-local function createDictionary(filename, tokenizer, vocab, getFreq)
+local function createVocab(filename, tokenizer, vocab, getFreq)
   local vocabSizeLimit = 2^31 - 1 --integer limit
   local vocabFreq
   if getFreq then
@@ -104,7 +117,7 @@ local function sortFrequency(vocab, freq)
   return vocab, decodeTable
 end
 
-function loadTextLinesVec(filename, vocab, tokenizer, minLength, maxLength)
+function loadTextLinesVec(filename, vocab, encodeFunc, minLength, maxLength)
   local minLength = minLength or 1
   local maxLength = maxLength or 50
   local tds = require 'tds'
@@ -112,14 +125,8 @@ function loadTextLinesVec(filename, vocab, tokenizer, minLength, maxLength)
   local vector = tds.Vec()
 
   for line in file:lines() do
-
-    local words = tokenizer(line)
-    local length = #words
-    if length > minLength and length < maxLength then
-      local wordsVec = torch.IntTensor(#words):zero()
-      for i=1, length do
-        wordsVec[i] = vocab[currWord]
-      end
+    local wordsVec = encodeFunc(line, -1, minLength, maxLength)
+    if wordsVec then
       vector:insert(wordsVec)
     end
   end
@@ -139,42 +146,49 @@ function reduceNumWords(sentences, num, replaceWith)
 end
 
 
-local dataFolder = '../../Datasets/training-monolingual/'--'../../Datasets/Books/'--
-local cacheFolder = './cache/'
-sys.execute('mkdir -p ' .. cacheFolder)
-
-local filename = 'news-commentary-v6.en'--'europarl-v6.en'
-local cacheFilename = cacheFolder .. filename .. '_cached.t7'
-
-local data
-if paths.filep(cacheFilename) then
-  data = torch.load(cacheFilename)
-else
-  data = loadTextLines(dataFolder .. filename ,tokens)
-  torch.save(cacheFilename, data)
-end
-return data
-
-
 local seqProvider = torch.class('seqProvider')
 function seqProvider:__init(...)
   local args = dok.unpack(
   {...},
   'seqProvider',
   'Sequence feeder',
-  {arg='data', type='userdata', help='data source', required = true},
+  {arg='source', type='text', help='data source filename', required = true},
+  {arg='tokenizer', type='function', help='tokenizing function', default=simpleTokenizer}
   {arg='padding', type='number', help='padding value', default = 0},
   {arg='startToken', type='number', help='token at start of eache sequence (optional)'},
   {arg='endToken', type='number', help='token at start of eache sequence (optional)'},
+  {arg='minLength', type='number', help='minimum sequence length', default = 3},
   {arg='maxLength', type='number', help='maximum sequence length', default = 50},
-  {arg='type', type='string', help='type of output tensor', default = 'torch.ByteTensor'}
+  {arg='type', type='string', help='type of output tensor', default = 'torch.ByteTensor'},
+  {arg='preprocess', type='boolean', help='save a preprocessed file', default = true}
   )
   self.padding = args.padding
   self.startToken = args.startToken
   self.endToken = args.endToken
-  self.data = args.data
   self.maxLength = args.maxLength
+  self.minLength = args.minLength
   self.buffer = torch.Tensor():type(args.type)
+  self.tokenizer = args.tokenizer
+  self.preprocess = args.preprocess
+
+
+  local vocab, freq = createVocab(args.source, self.tokenizer, {}, true)
+  self.vocab = sortFrequency(vocab,freq)
+  self.encoder = createEncodeFunc(vocab, tokenizer)
+  self.decoder = createDecodeFunc(vocab)
+  if preprocess then
+    self.data = loadTextLinesVec(args.source, self.vocab, self.encoder, self.minLength, self.maxLength)
+  else
+    self.data = io.open(args.source, 'r')
+  end
+end
+
+function seqProvider:encode(str)
+  return self.encoder(str)
+end
+
+function seqProvider:decode(vector)
+  return self.decoder(vector)
 end
 
 function seqProvider:type(t)
@@ -183,6 +197,38 @@ function seqProvider:type(t)
 end
 
 function seqProvider:getSequences(indexes)
+  local numSeqs = indexes:size(1)
+  local startSeq = 1
+  local addedLength = 0
+  local currMaxLength = 0
+
+  if self.startToken then
+    startSeq = 2
+    addedLength = 1
+  end
+  if self.endToken then
+    addedLength = addedLength + 1
+  end
+
+  local bufferLength = self.maxLength + addedLength
+  self.buffer:resize(numSeqs, bufferLength):fill(self.padding)
+  if self.startToken then
+    self.buffer:select(2,1):fill(self.startToken)
+  end
+
+  for i = 1, numSeqs do
+    local currSeq = self.data[indexes[i]]
+    local currLength = currSeq:nElement()
+    currMaxLength = math.max(currMaxLength, currLength)
+    self.buffer[i]:narrow(1, startSeq, currLength):copy(currSeq)
+    if self.endToken then
+      self.buffer[i][currLength + addedLength] = self.endToken
+    end
+  end
+  return self.buffer:narrow(2, 1, currMaxLength + addedLength)
+end
+
+function seqProvider:readNextSequences(indexes)
   local numSeqs = indexes:size(1)
   local startSeq = 1
   local addedLength = 0

@@ -124,7 +124,7 @@ function reduceNumWords(sentences, num, replaceWith)
 end
 
 
-local dataFolder = '../../Datasets/training-monolingual/'
+local dataFolder = '../../Datasets/training-monolingual/'--'../../Datasets/Books/'--
 local cacheFolder = './cache/'
 sys.execute('mkdir -p ' .. cacheFolder)
 
