@@ -4,6 +4,9 @@ local function createDecodeFunc(vocab)
     decoder[num] = word
   end
   local func = function(vec)
+    if vec == nil then
+      return nil
+    end
     local length
     if torch.type(vec) == 'number' then
       vec = {vec}
@@ -23,7 +26,10 @@ local function createDecodeFunc(vocab)
 end
 
 local function createEncodeFunc(vocab, tokenizer, buffer)
-  local func = function(missingVal, minLength, maxLength)
+  local func = function(str, missingVal, minLength, maxLength)
+    if str == nil then
+      return nil
+    end
     local minLength = minLength or 0
     local maxLength = maxLength or 2^31 -1
     local missingVal = missingVal or -1
@@ -153,109 +159,117 @@ function seqProvider:__init(...)
   'seqProvider',
   'Sequence feeder',
   {arg='source', type='text', help='data source filename', required = true},
-  {arg='tokenizer', type='function', help='tokenizing function', default=simpleTokenizer}
-  {arg='padding', type='number', help='padding value', default = 0},
-  {arg='startToken', type='number', help='token at start of eache sequence (optional)'},
-  {arg='endToken', type='number', help='token at start of eache sequence (optional)'},
-  {arg='minLength', type='number', help='minimum sequence length', default = 3},
-  {arg='maxLength', type='number', help='maximum sequence length', default = 50},
-  {arg='type', type='string', help='type of output tensor', default = 'torch.ByteTensor'},
-  {arg='preprocess', type='boolean', help='save a preprocessed file', default = true}
-  )
-  self.padding = args.padding
-  self.startToken = args.startToken
-  self.endToken = args.endToken
-  self.maxLength = args.maxLength
-  self.minLength = args.minLength
-  self.buffer = torch.Tensor():type(args.type)
-  self.tokenizer = args.tokenizer
-  self.preprocess = args.preprocess
+  {arg='tokenizer', type='function', help='tokenizing function', default=simpleTokenizer},
+    {arg='padding', type='number', help='padding value', default = 0},
+    {arg='startToken', type='number', help='token at start of eache sequence (optional)'},
+    {arg='endToken', type='number', help='token at start of eache sequence (optional)'},
+    {arg='minLength', type='number', help='minimum sequence length', default = 3},
+    {arg='maxLength', type='number', help='maximum sequence length', default = 50},
+    {arg='type', type='string', help='type of output tensor', default = 'torch.ByteTensor'},
+    {arg='cacheFolder', type='text', help='cache folder'},
+    {arg='preprocess', type='boolean', help='save a preprocessed file', default = true}
+    )
+    self.padding = args.padding
+    self.startToken = args.startToken
+    self.endToken = args.endToken
+    self.maxLength = args.maxLength
+    self.minLength = args.minLength
+    self.buffer = torch.Tensor():type(args.type)
+    self.tokenizer = args.tokenizer
+    self.preprocess = args.preprocess
+    self.currentIndex = 1
 
+    sys.execute('mkdir -p ' .. args.cacheFolder)
 
-  local vocab, freq = createVocab(args.source, self.tokenizer, {}, true)
-  self.vocab = sortFrequency(vocab,freq)
-  self.encoder = createEncodeFunc(vocab, tokenizer)
-  self.decoder = createDecodeFunc(vocab)
-  if preprocess then
-    self.data = loadTextLinesVec(args.source, self.vocab, self.encoder, self.minLength, self.maxLength)
-  else
-    self.data = io.open(args.source, 'r')
-  end
-end
+    local filename = args.source
+    local cacheFilename = cacheFolder .. filename .. '_cached.t7'
+    local vocabFilename = cacheFolder .. filename .. '_cached.t7'
 
-function seqProvider:encode(str)
-  return self.encoder(str)
-end
+    if paths.filep(vocabFilename) then
+      self.vocab =torch.load(vocabFilename)
+    else
+      local vocab, freq = createVocab(args.source, self.tokenizer, {}, true)
+      self.vocab = sortFrequency(vocab,freq)
+    end
 
-function seqProvider:decode(vector)
-  return self.decoder(vector)
-end
+    self.encoder = createEncodeFunc(vocab, tokenizer)
+    self.decoder = createDecodeFunc(vocab)
 
-function seqProvider:type(t)
-  self.buffer = self.buffer:type(t)
-  return self
-end
-
-function seqProvider:getSequences(indexes)
-  local numSeqs = indexes:size(1)
-  local startSeq = 1
-  local addedLength = 0
-  local currMaxLength = 0
-
-  if self.startToken then
-    startSeq = 2
-    addedLength = 1
-  end
-  if self.endToken then
-    addedLength = addedLength + 1
-  end
-
-  local bufferLength = self.maxLength + addedLength
-  self.buffer:resize(numSeqs, bufferLength):fill(self.padding)
-  if self.startToken then
-    self.buffer:select(2,1):fill(self.startToken)
-  end
-
-  for i = 1, numSeqs do
-    local currSeq = self.data[indexes[i]]
-    local currLength = currSeq:nElement()
-    currMaxLength = math.max(currMaxLength, currLength)
-    self.buffer[i]:narrow(1, startSeq, currLength):copy(currSeq)
-    if self.endToken then
-      self.buffer[i][currLength + addedLength] = self.endToken
+    if paths.filep(cacheFilename) then
+      self.data = torch.load(cacheFilename)
+    else
+      if preprocess then
+        self.data = loadTextLinesVec(args.source, self.vocab, self.encoder, self.minLength, self.maxLength)
+        self.getItemFunc = function(x, idx) return x[idx] end
+      else
+        self.data = io.open(args.source, 'r')
+        self.getItemFunc = function(x, idx)
+          local line = x:read('*l')
+          return self.encoder(line)
+        end
+      end
     end
   end
-  return self.buffer:narrow(2, 1, currMaxLength + addedLength)
-end
 
-function seqProvider:readNextSequences(indexes)
-  local numSeqs = indexes:size(1)
-  local startSeq = 1
-  local addedLength = 0
-  local currMaxLength = 0
-
-  if self.startToken then
-    startSeq = 2
-    addedLength = 1
-  end
-  if self.endToken then
-    addedLength = addedLength + 1
+  function seqProvider:encode(str)
+    return self.encoder(str)
   end
 
-  local bufferLength = self.maxLength + addedLength
-  self.buffer:resize(numSeqs, bufferLength):fill(self.padding)
-  if self.startToken then
-    self.buffer:select(2,1):fill(self.startToken)
+  function seqProvider:decode(vector)
+    return self.decoder(vector)
   end
 
-  for i = 1, numSeqs do
-    local currSeq = self.data[indexes[i]]
-    local currLength = currSeq:nElement()
-    currMaxLength = math.max(currMaxLength, currLength)
-    self.buffer[i]:narrow(1, startSeq, currLength):copy(currSeq)
+  function seqProvider:type(t)
+    self.buffer = self.buffer:type(t)
+    return self
+  end
+
+  function seqProvider:getIndexes(indexes)
+    assert(self.preprocess, "getIndexes available only for preprocessed files")
+    local numSeqs = indexes:size(1)
+    local startSeq = 1
+    local addedLength = 0
+    local currMaxLength = 0
+
+    if self.startToken then
+      startSeq = 2
+      addedLength = 1
+    end
     if self.endToken then
-      self.buffer[i][currLength + addedLength] = self.endToken
+      addedLength = addedLength + 1
+    end
+
+    local bufferLength = self.maxLength + addedLength
+    self.buffer:resize(numSeqs, bufferLength):fill(self.padding)
+    if self.startToken then
+      self.buffer:select(2,1):fill(self.startToken)
+    end
+
+    for i = 1, numSeqs do
+      local currSeq = self.getItemFunc(self.data, indexes[i])
+      local currLength = currSeq:nElement()
+      currMaxLength = math.max(currMaxLength, currLength)
+      self.buffer[i]:narrow(1, startSeq, currLength):copy(currSeq)
+      if self.endToken then
+        self.buffer[i][currLength + addedLength] = self.endToken
+      end
+    end
+    return self.buffer:narrow(2, 1, currMaxLength + addedLength)
+  end
+
+  function seqProvider:getBatch(size)
+    if self.currentIndex >= #self.data then
+      return nil
+    end
+    local lastIndex = math.min(self.currentIndex + size - 1, #self.data)
+    local range = torch.range(self.currentIndex, lastIndex)
+    self.currentIndex = self.lastIndex
+    return self:getIndexes(range)
+  end
+
+  function seqProvider:reset()
+    self.currentIndex = 1
+    if not self.preprocess then
+      self.data:seek("set")
     end
   end
-  return self.buffer:narrow(2, 1, currMaxLength + addedLength)
-end
