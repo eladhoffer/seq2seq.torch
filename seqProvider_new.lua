@@ -1,3 +1,4 @@
+local tds = require 'tds'
 local function createDecodeFunc(vocab)
   local decoder = {}
   for word,num in pairs(vocab) do
@@ -64,12 +65,9 @@ local function simpleTokenizer(sentence)
   return words
 end
 
-local function createVocab(filename, tokenizer, vocab, getFreq)
+local function createVocab(filename, tokenizer, vocab)
   local vocabSizeLimit = 2^31 - 1 --integer limit
-  local vocabFreq
-  if getFreq then
-    vocabFreq = {}
-  end
+  local vocabFreq = {}
   local vocab = vocab or {}
   local currentNum = 1
   for _ in pairs(vocab) do
@@ -86,14 +84,10 @@ local function createVocab(filename, tokenizer, vocab, getFreq)
       local encodedNum = vocab[currWord]
       if not encodedNum then
         vocab[currWord] = currentNum
-        if getFreq then
-          vocabFreq[currWord] = 0
-        end
+        vocabFreq[currWord] = 0
         currentNum = currentNum + 1
       end
-      if getFreq then
-        vocabFreq[currWord] = vocabFreq[currWord] + 1
-      end
+      vocabFreq[currWord] = vocabFreq[currWord] + 1
     end
   end
   return vocab, vocabFreq, currentNum - 1
@@ -106,7 +100,7 @@ local function sortFrequency(vocab, freq)
   end
   local vocabFreq = torch.IntTensor(currentNum - 1):zero()
   for word,num in pairs(vocab) do
-    vocabFreq = freq[words]
+    vocabFreq[num] = freq[word]
   end
   local sortedIdxs
   vocabFreq, sortedIdxs = vocabFreq:sort(1, true)
@@ -166,7 +160,7 @@ function seqProvider:__init(...)
     {arg='minLength', type='number', help='minimum sequence length', default = 3},
     {arg='maxLength', type='number', help='maximum sequence length', default = 50},
     {arg='type', type='string', help='type of output tensor', default = 'torch.ByteTensor'},
-    {arg='cacheFolder', type='text', help='cache folder'},
+    {arg='cacheFolder', type='text', help='cache folder', default = './cache/'},
     {arg='preprocess', type='boolean', help='save a preprocessed file', default = true}
     )
     self.padding = args.padding
@@ -178,35 +172,44 @@ function seqProvider:__init(...)
     self.tokenizer = args.tokenizer
     self.preprocess = args.preprocess
     self.currentIndex = 1
-
     sys.execute('mkdir -p ' .. args.cacheFolder)
 
-    local filename = args.source
-    local cacheFilename = cacheFolder .. filename .. '_cached.t7'
-    local vocabFilename = cacheFolder .. filename .. '_cached.t7'
+    local filename = paths.basename(args.source, 'txt')
+    local cacheFilename = args.cacheFolder .. filename .. '_cached.t7'
+    local vocabFilename = args.cacheFolder .. filename .. '_vocab.t7'
 
     if paths.filep(vocabFilename) then
       self.vocab =torch.load(vocabFilename)
     else
       local vocab, freq = createVocab(args.source, self.tokenizer, {}, true)
       self.vocab = sortFrequency(vocab,freq)
+      torch.save(vocabFilename, self.vocab)
     end
 
-    self.encoder = createEncodeFunc(vocab, tokenizer)
-    self.decoder = createDecodeFunc(vocab)
+    self.encoder = createEncodeFunc(self.vocab, self.tokenizer)
+    self.decoder = createDecodeFunc(self.vocab)
 
-    if paths.filep(cacheFilename) then
-      self.data = torch.load(cacheFilename)
-    else
-      if preprocess then
-        self.data = loadTextLinesVec(args.source, self.vocab, self.encoder, self.minLength, self.maxLength)
-        self.getItemFunc = function(x, idx) return x[idx] end
+
+    if preprocess then
+      if paths.filep(cacheFilename) then
+        self.data = torch.load(cacheFilename)
       else
-        self.data = io.open(args.source, 'r')
-        self.getItemFunc = function(x, idx)
-          local line = x:read('*l')
-          return self.encoder(line)
-        end
+        self.data = loadTextLinesVec(args.source, self.vocab, self.encoder, self.minLength, self.maxLength)
+        torch.save(cacheFilename, self.data)
+      end
+      self.lastIndex = #self.data
+      self.getItemFunc = function(idx) return self.data[idx] end
+    else
+      self.data = io.open(args.source, 'r')
+      self.lastIndex = 0
+      for _ in self.data:lines() do
+        self.lastIndex = self.lastIndex + 1
+      end
+      self.data:seek("set")
+      self.getItemFunc = function(idx)
+        local line = self.data:read()
+        print(line)
+        return self.encoder(line)
       end
     end
   end
@@ -246,7 +249,8 @@ function seqProvider:__init(...)
     end
 
     for i = 1, numSeqs do
-      local currSeq = self.getItemFunc(self.data, indexes[i])
+      print(i)
+      local currSeq = self.getItemFunc(indexes[i])
       local currLength = currSeq:nElement()
       currMaxLength = math.max(currMaxLength, currLength)
       self.buffer[i]:narrow(1, startSeq, currLength):copy(currSeq)
@@ -258,10 +262,10 @@ function seqProvider:__init(...)
   end
 
   function seqProvider:getBatch(size)
-    if self.currentIndex >= #self.data then
+    if self.currentIndex >= self.lastIndex then
       return nil
     end
-    local lastIndex = math.min(self.currentIndex + size - 1, #self.data)
+    local lastIndex = math.min(self.currentIndex + size - 1, self.lastIndex)
     local range = torch.range(self.currentIndex, lastIndex)
     self.currentIndex = self.lastIndex
     return self:getIndexes(range)
