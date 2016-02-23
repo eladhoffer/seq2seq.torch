@@ -13,39 +13,14 @@ local logFilename = paths.concat(opt.save,'LossRate.log')
 local log = optim.Logger(logFilename)
 
 ----------------------------------------------------------------------
-local wordsFile = 'ptb_words.txt'
-local words = vocabulary{source='../recurrent.torch/examples/language/data/ptb.train.txt', tokenizer = function(l) return l:split(' ') end}
-print(words:size())
-words:saveAsText(wordsFile)
-
-local function splitChars(str)
-  local function split(str)
-    if #str>0 then
-      return str:sub(1,1), split(str:sub(2))
-    end
-  end
-  return {split(str)}
-end
 local encodedSeq = seqProvider{
-  source = wordsFile, maxLength = opt.seqLength,
-  type = 'torch.CudaTensor', preprocess = true, tokenizer = splitChars
+  source = '/home/ehoffer/Datasets/Books/books_large.txt', maxLength = opt.seqLength, limitVocab = 20000, offsetStart = 1, offsetEnd = -1,
+  type = 'torch.CudaTensor', preprocess = false, tokenizer = function(s) return s:lower():split(' ') end
 }
-print('Encoded Vocabulary:', encodedSeq.vocab:size())
-
-encodedSeq.vocab:saveAsText('check.txt')
 local decodedSeq = seqProvider{
-  source = wordsFile, maxLength = opt.seqLength, type = 'torch.CudaTensor',
-  padStart = true, padEnd = true, preprocess = true, vocab = encodedSeq.vocab
+  source = '/home/ehoffer/Datasets/Books/books_large.txt', maxLength = opt.seqLength, type = 'torch.CudaTensor', limitVocab = 20000,
+  padStart = true, padEnd = true, preprocess = false, vocab = encodedSeq.vocab, offsetStart = 2, offsetEnd = 0
 }
-print(encodedSeq:encode('al'))
-print('Decoded Vocabulary:', decodedSeq.vocab:size())
---while true do
---  local b=decodedSeq:getBatch(4)
---  print(b[1])
---print(decodedSeq:decode(b[1]))
---io.read()
---end
---print('Dataset size (encoded=decoded)', encodedSeq:size(), decodedSeq:size())
 print('Dataset size (encoded=decoded)', encodedSeq:size(), decodedSeq:size())
 if paths.filep(opt.load) then
     local modelConfig = torch.load(opt.load)
@@ -126,7 +101,7 @@ local optimState = {
 
 local seq2seq = Seq2Seq{
   encoder = enc,
-  optimFunc=_G.optim[opt.optimization],
+  optimFunc =_G.optim[opt.optimization],
   optimState = optimState,
   criterion = criterion,
   batchSize = opt.batchSize
@@ -185,7 +160,7 @@ function sample(encoderTbl, decoderTbl, str)
     predText = {}
     local encoded = encodeVocab:encode(str):type(TensorType)
 
-    print('\nOriginal:\n' .. table.concat(encodeVocab:decode(encoded)))
+    print('\nOriginal:\n' .. table.concat(encodeVocab:decode(encoded),' '))
     wordNum = torch.Tensor({decodeVocab:go()}):type(TensorType)
     --if encoded:nElement() == 1 then
     --  encoded = encodeVocab:encode(str .. 'a'):type(TensorType)
@@ -205,7 +180,7 @@ function sample(encoderTbl, decoderTbl, str)
         end
         table.insert(predText, decodeVocab:decode(wordNum)[1])
     end
-    return table.concat(predText)
+    return table.concat(predText,' ')
 end
 
 
@@ -219,11 +194,12 @@ local epoch = 1
 
 repeat
     print('\nEpoch ' .. epoch ..'\n')
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'Lately, with gold prices up more than 300% over the last decade, it is harder than ever.'))
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'a form of asbestos once used to make kent cigarette filters has caused a high percentage of cancer deaths among a group of workers'))
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},"the following were among yesterday 's offerings and pricings in the u.s. and non-u.s. capital markets"))
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'nothing could be further from the truth'))
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'Are you one of millions out there who are trying to learn foreign language, but never have enough time?'))
 
-    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'a'))
-    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'b'))
-    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'nothing'))
-    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'millions'))
     local LossTrain = seq2seq:learn(encodedSeq,{decodedSeq})
     saveModel(epoch)
 
