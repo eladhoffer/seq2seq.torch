@@ -12,7 +12,6 @@ cmd:text('===>Model And Training Regime')
 cmd:option('-model',              'GRU',                      'Recurrent model [RNN, iRNN, LSTM, GRU]')
 cmd:option('-seqLength',          50,                          'number of timesteps to unroll for')
 cmd:option('-rnnSize',            256,                         'size of rnn hidden layer')
-cmd:option('-embeddingSize',      256,                          'size of word embedding')
 cmd:option('-numLayers',          1,                           'number of layers in the LSTM')
 cmd:option('-dropout',            0,                           'dropout p value')
 cmd:option('-LR',                 1e-3,                        'learning rate')
@@ -54,3 +53,36 @@ torch.setdefaulttensortype('torch.FloatTensor')
 -- Output files configuration
 os.execute('mkdir -p ' .. opt.save)
 cmd:log(opt.save .. '/log.txt', opt)
+
+if opt.type =='cuda' then
+    require 'cutorch'
+    require 'cunn'
+    cutorch.setDevice(opt.devid)
+    cutorch.manualSeed(opt.seed)
+    cutorch.setHeapTracking(true)
+end
+
+local types = {
+  cuda = 'torch.CudaTensor',
+  float = 'torch.FloatTensor',
+  cl = 'torch.ClTensor',
+  double = 'torch.DoubleTensor'
+}
+
+opt.tensorType = types[opt.type] or 'torch.FloatTensor'
+function buildEncDec(vocabSize, reverse)
+  local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
+  local rnn = rnnTypes[opt.model]
+  local hiddenSize = opt.embeddingSize
+  recEncDec = nn.Sequential():add(nn.LookupTable(vocabSize, opt.rnnSize))
+  if reverse then
+    recEncDec:add(nn.Reverse(2))
+  end
+  for i=1, opt.numLayers do
+    recEncDec:add(rnn(opt.rnnSize, opt.rnnSize, opt.initWeight))
+    if opt.dropout > 0 then
+      recEncDec:add(nn.Dropout(opt.dropout))
+    end
+  end
+  return recEncDec
+end

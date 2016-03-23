@@ -5,100 +5,27 @@ require 'recurrent'
 require 'eladtools'
 require 'seqProvider'
 require 'Seq2Seq'
--------------------------------------------------------
 
-cmd = torch.CmdLine()
-cmd:addTime()
-cmd:text()
-cmd:text('Training recurrent networks on word-level text dataset')
-cmd:text()
-cmd:text('==>Options')
+dofile('opt.lua')
 
-cmd:text('===>Data Options')
-cmd:option('-shuffle',            false,                       'shuffle training samples')
-
-cmd:text('===>Model And Training Regime')
-cmd:option('-model',              'GRU',                      'Recurrent model [RNN, iRNN, LSTM, GRU]')
-cmd:option('-seqLength',          50,                          'number of timesteps to unroll for')
-cmd:option('-rnnSize',            256,                         'size of rnn hidden layer')
-cmd:option('-embeddingSize',      256,                          'size of word embedding')
-cmd:option('-numLayers',          1,                           'number of layers in the LSTM')
-cmd:option('-dropout',            0,                           'dropout p value')
-cmd:option('-LR',                 1e-3,                        'learning rate')
-cmd:option('-LRDecay',            0,                           'learning rate decay (in # samples)')
-cmd:option('-weightDecay',        0,                           'L2 penalty on the weights')
-cmd:option('-momentum',           0,                           'momentum')
-cmd:option('-batchSize',          32,                          'batch size')
-cmd:option('-decayRate',          2,                           'exponential decay rate')
-cmd:option('-initWeight',         0.05,                        'uniform weight initialization range')
-cmd:option('-earlyStop',          5,                           'number of bad epochs to stop after')
-cmd:option('-optimization',       'adam',                   'optimization method')
-cmd:option('-gradClip',           5,                           'clip gradients at this value')
-cmd:option('-epoch',              100,                         'number of epochs to train')
-cmd:option('-epochDecay',         5,                           'number of epochs to start decay learning rate')
-
-cmd:text('===>Platform Optimization')
-cmd:option('-threads',            8,                           'number of threads')
-cmd:option('-type',               'cuda',                      'float or cuda')
-cmd:option('-devid',              1,                           'device ID (if using CUDA)')
-cmd:option('-nGPU',               1,                           'num of gpu devices used')
-cmd:option('-seed',               123,                         'torch manual random number generator seed')
-cmd:option('-constBatchSize',     false,                       'do not allow varying batch sizes')
-
-cmd:text('===>Save/Load Options')
-cmd:option('-load',               '',                          'load existing net weights')
-cmd:option('-save',               os.date():gsub(' ',''),      'save directory')
-cmd:option('-optState',           false,                       'Save optimization state every epoch')
-cmd:option('-checkpoint',         0,                           'Save a weight check point every n samples. 0 for off')
-
-
-
-
-opt = cmd:parse(arg or {})
-opt.save = paths.concat('./Results', opt.save)
-torch.setnumthreads(opt.threads)
-torch.manualSeed(opt.seed)
-torch.setdefaulttensortype('torch.FloatTensor')
-
-if opt.type =='cuda' then
-    require 'cutorch'
-    require 'cunn'
-    cutorch.setDevice(opt.devid)
-    cutorch.manualSeed(opt.seed)
-    cutorch.setHeapTracking(true)
-end
-
-local types = {
-  cuda = 'torch.CudaTensor',
-  float = 'torch.FloatTensor',
-  cl = 'torch.ClTensor',
-  double = 'torch.DoubleTensor'
-}
-
-local TensorType = types[opt.type] or 'torch.FloatTensor'
--- Output files configuration
-os.execute('mkdir -p ' .. opt.save)
-cmd:log(opt.save .. '/log.txt', opt)
 local netFilename = paths.concat(opt.save, 'Net')
 local logFilename = paths.concat(opt.save,'LossRate.log')
-local log = optim.Logger(logFilename)
-
 ----------------------------------------------------------------------
 -- Model + Loss:
 local encodedSeq = seqProvider{
-  source = '/home/ehoffer/Datasets/Translation/news-commentary-v10.fr-en.en', maxLength = opt.seqLength, limitVocab = 50000,
-  type = TensorType, preprocess = false
+  source = '/home/ehoffer/Datasets/Language/news_commentary_v10/news-commentary-v10.fr-en.en', maxLength = opt.seqLength, limitVocab = 50000,
+  type = opt.tensorType, preprocess = false
 }
 local decodedSeq = seqProvider{
-  source = '/home/ehoffer/Datasets/Translation/news-commentary-v10.fr-en.fr', maxLength = opt.seqLength, type = TensorType, limitVocab = 50000,
-  padStart = true, padEnd = true, preprocess = false
+  source = '/home/ehoffer/Datasets/Language/news_commentary_v10/news-commentary-v10.fr-en.fr', maxLength = opt.seqLength, limitVocab = 50000,
+  type = opt.tensorType, padStart = true, padEnd = true, preprocess = false
 }
 
-print(decodedSeq:decode(decodedSeq:getBatch(1)[1]))
+--print(decodedSeq:decode(decodedSeq:getBatch(8)[1]))
 print('Encoded Vocabulary:', encodedSeq.vocab:size())
 print('Decoded Vocabulary:', decodedSeq.vocab:size())
---print('Dataset size (encoded=decoded)', encodedSeq:size(), decodedSeq:size())
-print('Dataset size (encoded=decoded)', encodedSeq:size(), decodedSeq:size())
+print('Dataset size (encoded == decoded)', encodedSeq:size(), decodedSeq:size())
+
 if paths.filep(opt.load) then
     local modelConfig = torch.load(opt.load)
     print('==>Loaded Net from: ' .. opt.load)
@@ -106,55 +33,26 @@ if paths.filep(opt.load) then
     recurrentDecoder = modelConfig.recurrentDecoder
     classifier = modelConfig.classifier
 else
-    local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
-    local rnn = rnnTypes[opt.model]
-    local hiddenSize = opt.embeddingSize
-    recurrentEncoder = nn.Sequential():add(nn.LookupTable(encodedSeq.vocab:size(), opt.embeddingSize, encodedSeq.vocab:pad())):add(nn.Reverse(2))
-    for i=1, opt.numLayers do
-        recurrentEncoder:add(rnn(hiddenSize, opt.rnnSize, opt.initWeight))
-        if opt.dropout > 0 then
-            recurrentEncoder:add(nn.Dropout(opt.dropout))
-        end
-        hiddenSize = opt.rnnSize
-    end
-
-    hiddenSize = opt.embeddingSize
-    recurrentDecoder = nn.Sequential():add(nn.LookupTable(decodedSeq.vocab:size(), opt.embeddingSize, decodedSeq.vocab:pad()))
-    for i=1, opt.numLayers do
-        recurrentDecoder:add(rnn(hiddenSize, opt.rnnSize, opt.initWeight))
-        if opt.dropout > 0 then
-            recurrentDecoder:add(nn.Dropout(opt.dropout))
-        end
-        hiddenSize = opt.rnnSize
-    end
+    recurrentEncoder = buildEncDec(encodedSeq.vocab:size(), true)
+    recurrentDecoder = buildEncDec(decodedSeq.vocab:size(), false)
     classifier = nn.Linear(opt.rnnSize, decodedSeq.vocab:size())
 end
 
-classifier:share(recurrentDecoder:get(1), 'weight','gradWeight')
+--tie classification and embedding weights
+classifier:share(recurrentDecoder:findModules('nn.LookupTable')[1], 'weight','gradWeight')
 
---local lookupZero = function(self, input) --used to ensure padding is a zeros vector
---
---  local out = nn.LookupTable.updateOutput(self, input)
---  local dim =  input:dim() + 1
---  out:cmul(nn.utils.addSingletonDimension(input:ne(0),dim):expandAs(out))
-----  embedder.weight[vocab['<PAD>']]:zero()
-----  return nn.LookupTable.updateOutput(...)
---return out
---end
---recurrentEncoder:get(1).updateOutput = lookupZero
---recurrentDecoder:get(1).updateOutput = lookupZero
-recurrentEncoder:get(1).weight[encodedSeq.vocab:pad()]:zero()
-recurrentDecoder:get(1).weight[decodedSeq.vocab:pad()]:zero()
-local criterion = nn.CrossEntropyCriterion():type(TensorType)
+function zeroPadWeights(m, padIdx)
+  local lookuptbl = m:findModules('nn.LookupTable')[1]
+  lookuptbl.paddingValue = padIdx
+  lookuptbl.weight[padIdx]:zero()
+end
+
+zeroPadWeights(recurrentEncoder, encodedSeq.vocab:pad())
+zeroPadWeights(recurrentDecoder, decodedSeq.vocab:pad())
+local criterion = nn.CrossEntropyCriterion():type(opt.tensorType)
 
 
-
-
-
-
-local enc = nn.Sequential()
-enc:add(recurrentEncoder)
-
+local enc = recurrentEncoder
 local dec = nn.Sequential()
 dec:add(recurrentDecoder)
 dec:add(nn.TemporalModule(classifier))
@@ -182,7 +80,7 @@ local seq2seq = Seq2Seq{
   padValue = decodedSeq.vocab:pad()
 }
 seq2seq:addDecoder(dec)
-seq2seq:type(TensorType)
+seq2seq:type(opt.tensorType)
 seq2seq:flattenParameters()
 
 ----------------------------------------------------------------------
@@ -224,9 +122,9 @@ function sample(encoderTbl, decoderTbl, str)
     decoderModel:evaluate()
     local pred, predText, embedded
     predText = {}
-    local encoded = encodeVocab:encode(str):type(TensorType)
+    local encoded = encodeVocab:encode(str):type(opt.tensorType)
     print('\nOriginal:\n' .. table.concat(encodeVocab:decode(encoded) ,' '))
-    wordNum = torch.Tensor({decodeVocab:go()}):type(TensorType)
+    wordNum = torch.Tensor({decodeVocab:go()}):type(opt.tensorType)
     if encoded:nElement() == 1 then
       encoderModel:single()
     end
@@ -246,7 +144,7 @@ function sample(encoderTbl, decoderTbl, str)
 end
 
 
-local sampledDec = nn.Sequential():add(recurrentDecoder):add(classifier):add(nn.SoftMax():type(TensorType))
+local sampledDec = nn.Sequential():add(recurrentDecoder):add(classifier):add(nn.SoftMax():type(opt.tensorType))
 
 local decreaseLR = EarlyStop(1,opt.epochDecay)
 local stopTraining = EarlyStop(opt.earlyStop, opt.epoch)

@@ -122,7 +122,7 @@ function Seq2Seq:evaluate(encodedSeq, decodedSeqs, train)
         currLoss = seqCriterion:forward(y[m],yt[m])
         lossVals[m] = lossVals[m] + currLoss --/ self.maxLength
       end
-      print(currLoss)
+    --  print(currLoss)
       ----Training -> backpropagation
       if train then
         local weights, gradients = unpack(self.params)

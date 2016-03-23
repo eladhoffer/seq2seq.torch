@@ -87,11 +87,12 @@ function vocabulary:__init(...)
     self:add(self.endToken, true)
     self:add(self.startToken, true)
     self:add(self.unkToken, true)
+    self:add(self.padToken, true)
   end
 
 
 function vocabulary:pad()
-  return self.vocab[self.startToken]
+  return self.vocab[self.padToken]
 end
 
 function vocabulary:go()
