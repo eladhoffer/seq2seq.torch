@@ -67,9 +67,10 @@ function vocabulary:__init(...)
   {...},
   'vocabulary',
   'Sequence feeder',
-  {arg='source', type='text', help='data source filename', required = true},
-  {arg='tokenizer', type='function', help='tokenizing function', default=simpleTokenizer},
+    {arg='source', type='text', help='data source filename', required = true},
+    {arg='tokenizer', type='function', help='tokenizing function', default=simpleTokenizer},
     {arg='unkToken', type='string', help='unknown token', default = '<UNK>'},
+    {arg='padToken', type='string', help='unknown token', default = '<PAD>'},
     {arg='startToken', type='string', help='token at start of eache sequence', default = '<GO>'},
     {arg='endToken', type='string', help='token at start of eache sequence', default = '<EOS>'}
     )
@@ -78,6 +79,7 @@ function vocabulary:__init(...)
     self.limitVocab = args.limitVocab
     self.startToken = args.startToken
     self.endToken = args.endToken
+    self.padToken = args.padToken
     self.unkToken = args.unkToken
 
     local vocab, freq = createVocab(args.source, self.tokenizer, nil, true)
@@ -86,6 +88,11 @@ function vocabulary:__init(...)
     self:add(self.startToken, true)
     self:add(self.unkToken, true)
   end
+
+
+function vocabulary:pad()
+  return self.vocab[self.startToken]
+end
 
 function vocabulary:go()
   return self.vocab[self.startToken]

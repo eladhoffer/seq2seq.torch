@@ -60,6 +60,22 @@ torch.setnumthreads(opt.threads)
 torch.manualSeed(opt.seed)
 torch.setdefaulttensortype('torch.FloatTensor')
 
+if opt.type =='cuda' then
+    require 'cutorch'
+    require 'cunn'
+    cutorch.setDevice(opt.devid)
+    cutorch.manualSeed(opt.seed)
+    cutorch.setHeapTracking(true)
+end
+
+local types = {
+  cuda = 'torch.CudaTensor',
+  float = 'torch.FloatTensor',
+  cl = 'torch.ClTensor',
+  double = 'torch.DoubleTensor'
+}
+
+local TensorType = types[opt.type] or 'torch.FloatTensor'
 -- Output files configuration
 os.execute('mkdir -p ' .. opt.save)
 cmd:log(opt.save .. '/log.txt', opt)
@@ -71,10 +87,10 @@ local log = optim.Logger(logFilename)
 -- Model + Loss:
 local encodedSeq = seqProvider{
   source = '/home/ehoffer/Datasets/Translation/news-commentary-v10.fr-en.en', maxLength = opt.seqLength, limitVocab = 50000,
-  type = 'torch.CudaTensor', preprocess = false
+  type = TensorType, preprocess = false
 }
 local decodedSeq = seqProvider{
-  source = '/home/ehoffer/Datasets/Translation/news-commentary-v10.fr-en.fr', maxLength = opt.seqLength, type = 'torch.CudaTensor', limitVocab = 50000,
+  source = '/home/ehoffer/Datasets/Translation/news-commentary-v10.fr-en.fr', maxLength = opt.seqLength, type = TensorType, limitVocab = 50000,
   padStart = true, padEnd = true, preprocess = false
 }
 
@@ -93,7 +109,7 @@ else
     local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
     local rnn = rnnTypes[opt.model]
     local hiddenSize = opt.embeddingSize
-    recurrentEncoder = nn.Sequential():add(nn.LookupTable(encodedSeq.vocab:size(), opt.embeddingSize)):add(nn.Reverse(2))
+    recurrentEncoder = nn.Sequential():add(nn.LookupTable(encodedSeq.vocab:size(), opt.embeddingSize, encodedSeq.vocab:pad())):add(nn.Reverse(2))
     for i=1, opt.numLayers do
         recurrentEncoder:add(rnn(hiddenSize, opt.rnnSize, opt.initWeight))
         if opt.dropout > 0 then
@@ -103,7 +119,7 @@ else
     end
 
     hiddenSize = opt.embeddingSize
-    recurrentDecoder = nn.Sequential():add(nn.LookupTable(decodedSeq.vocab:size(), opt.embeddingSize))
+    recurrentDecoder = nn.Sequential():add(nn.LookupTable(decodedSeq.vocab:size(), opt.embeddingSize, decodedSeq.vocab:pad()))
     for i=1, opt.numLayers do
         recurrentDecoder:add(rnn(hiddenSize, opt.rnnSize, opt.initWeight))
         if opt.dropout > 0 then
@@ -116,31 +132,23 @@ end
 
 classifier:share(recurrentDecoder:get(1), 'weight','gradWeight')
 
-local lookupZero = function(self, input) --used to ensure padding is a zeros vector
+--local lookupZero = function(self, input) --used to ensure padding is a zeros vector
+--
+--  local out = nn.LookupTable.updateOutput(self, input)
+--  local dim =  input:dim() + 1
+--  out:cmul(nn.utils.addSingletonDimension(input:ne(0),dim):expandAs(out))
+----  embedder.weight[vocab['<PAD>']]:zero()
+----  return nn.LookupTable.updateOutput(...)
+--return out
+--end
+--recurrentEncoder:get(1).updateOutput = lookupZero
+--recurrentDecoder:get(1).updateOutput = lookupZero
+recurrentEncoder:get(1).weight[encodedSeq.vocab:pad()]:zero()
+recurrentDecoder:get(1).weight[decodedSeq.vocab:pad()]:zero()
+local criterion = nn.CrossEntropyCriterion():type(TensorType)
 
-  local out = nn.LookupTable.updateOutput(self, input)
-  local dim =  input:dim() + 1
-  out:cmul(nn.utils.addSingletonDimension(input:ne(0),dim):expandAs(out))
---  embedder.weight[vocab['<PAD>']]:zero()
---  return nn.LookupTable.updateOutput(...)
-return out
-end
-recurrentEncoder:get(1).updateOutput = lookupZero
-recurrentDecoder:get(1).updateOutput = lookupZero
-local criterion = nn.CrossEntropyCriterion()
 
 
-local TensorType = 'torch.FloatTensor'
-
-if opt.type =='cuda' then
-    require 'cutorch'
-    require 'cunn'
-    cutorch.setDevice(opt.devid)
-    cutorch.manualSeed(opt.seed)
-    cutorch.setHeapTracking(true)
-    criterion = criterion:cuda()
-    TensorType = 'torch.CudaTensor'
-end
 
 
 
@@ -170,7 +178,8 @@ local seq2seq = Seq2Seq{
   optimFunc=_G.optim[opt.optimization],
   optimState = optimState,
   criterion = criterion,
-  batchSize = opt.batchSize
+  batchSize = opt.batchSize,
+  padValue = decodedSeq.vocab:pad()
 }
 seq2seq:addDecoder(dec)
 seq2seq:type(TensorType)
@@ -202,137 +211,6 @@ function saveModel(epoch)
   collectgarbage()
 end
 
-
-local function lossNoPadding(criterion, y, yt, padToken)
-    local loss = 0
-    for i = 1, y:size(1) do
-        local currLength = 1
-        local currLoss = 0
-        for j = 1, y:size(2) do
-            if yt[i][j] == padToken then break end
-            currLoss = currLoss + criterion:forward(y[i][j], yt[i][j])
-            currLength = currLength + 1
-        end
-        loss = loss + currLoss / currLength
-    end
-    loss = loss / y:size(1)
-    return loss
-end
-
-
-
-
-----------------------------------------------------------------------
---[[  function seq2seq(encoderTbl, decoderTbls, train)
-    -- input is of form {data, model, vocab}, {data, model, vocab},...
-    -- data is ordered batches X batchSize X smpLength
-    local maxLength = opt.seqLength
-
-    local encoderModel, encodedSeq = unpack(encoderTbl)
-    encodedSeq:reset()
-
-    if train then
-      encoderModel:training()
-    else
-      encoderModel:evaluate()
-    end
-    encoderModel:sequence()
-    encoderModel:forget()
-    encoderModel:setIterations(maxLength)
-    local decoderModels = {}
-    local decodedSeqs = {}
-    local decoderData = {}
-
-    for m, decTbl in pairs(decoderTbls) do
-      decoderModels[m], decodedSeqs[m] = unpack(decTbl)
-      decodedSeqs[m]:reset()
-
-      if train then
-        decoderModels[m]:training()
-      else
-        decoderModels[m]:evaluate()
-      end
-      decoderModels[m]:sequence()
-      decoderModels[m]:forget()
-      decoderModels[m]:setIterations(maxLength)
-    end
-    local numBatches = math.floor(encodedSeq:size() / opt.batchSize)
-    local numSamples = 1
-    local lossVals = torch.FloatTensor(#decoderModels):zero()
-    local randIndexes = torch.LongTensor():randperm(encodedSeq:size())
-
-    for b = 1, numBatches do
-      local x = {}
-      local yt = {}
-      local y = {}
-      local currLoss = 0
-      x[0] = encodedSeq:getBatch(opt.batchSize)--:getIndexes(randIndexes:narrow(1, numSamples, opt.batchSize))
-      encoderModel:zeroState()
-      local out = encoderModel:forward(x[0])
-
-      local state = encoderModel:getState()
-
-      for m = 1, #decoderModels do
-        decoderModels[m]:setState(state)
-        local seq = decodedSeqs[m]:getBatch(opt.batchSize)--:getIndexes(randIndexes:narrow(1, numSamples, opt.batchSize))
-        x[m] = seq:sub(1,-1,1,-2)
-        yt[m] = seq:sub(1,-1,2,-1):contiguous()
-
-        y[m] = decoderModels[m]:forward(x[m])
-
-        currLoss = lossNoPadding(criterion, y[m], yt[m], 0)
-
-  --    print(torch.exp(currLoss))
-        lossVals[m] = lossVals[m] + currLoss --/ opt.seqLength
-        seqCriterion:forward(y[m],yt[m])
-
-      end
-      ----Training -> backpropagation
-      if train then
-        local f_eval = function()
-
-          encoderModel:zeroGradParameters()
-          encoderModel:zeroGradState()
-
-          for m = 1, #decoderModels do
-            decoderModels[m]:zeroGradParameters()
-            decoderModels[m]:zeroGradState()
-
-            local dE_dy = seqCriterion:backward(y[m],yt[m])
-            dE_dy:cmul(yt[m]:ne(0):view(yt[m]:size(1),yt[m]:size(2), 1):expandAs(dE_dy))
-            --print('dE')
-
-            decoderModels[m]:backward(x[m], dE_dy)
-            local decoderGradState = decoderModels[m]:getGradState()
-            encoderModel:accGradState(decoderGradState)
-
-          end
-
-          encoderModel:backward(x[0], out:zero())
-
-          --Gradient clipping (actually normalizing)
-          local norm = gradients:norm()
-          if norm > 5 then
-            local shrink = 5 / norm
-            gradients:mul(shrink)
-          end
-
-          return currLoss, gradients
-        end
-
-        _G.optim[opt.optimization](f_eval, weights, optimState)
-
-      end
-      numSamples = numSamples + opt.batchSize
-
-      xlua.progress(numSamples - 1, encodedSeq:size())
-    end
-
-    xlua.progress(encodedSeq:size(), encodedSeq:size())
-    lossVals:div(numBatches)
-    return lossVals:mean()
-  end]]
-------------------------------
 
 
 function sample(encoderTbl, decoderTbl, str)

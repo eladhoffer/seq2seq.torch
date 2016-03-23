@@ -22,7 +22,6 @@ function seqProvider:__init(...)
     {arg='source', type='text', help='data source filename', required = true},
     {arg='vocab', type='userdata', help='vocabulary class object'},
     {arg='tokenizer', type='function', help='tokenizing function'},
-    {arg='padding', type='number', help='padding value', default = 0},
     {arg='padStart', type='boolean', help='token at start of eache sequence (optional)'},
     {arg='padEnd', type='boolean', help='token at start of eache sequence (optional)'},
     {arg='minLength', type='number', help='minimum sequence length', default = 1},
@@ -34,7 +33,6 @@ function seqProvider:__init(...)
     {arg='preprocess', type='boolean', help='save a preprocessed file', default = true},
     {arg='limitVocab', type='number', help='size limit for vocabulary'}
     )
-    self.padding = args.padding
     self.maxLength = args.maxLength
     self.minLength = args.minLength
     self.padStart = args.padStart
@@ -145,7 +143,7 @@ function seqProvider:getIndexes(indexes)
     addedLength = addedLength + 1
   end
   local bufferLength = self.maxLength + addedLength
-  self.buffer:resize(numSeqs, bufferLength):fill(self.padding)
+  self.buffer:resize(numSeqs, bufferLength):fill(self.vocab:pad())
   if self.padStart then
     self.buffer:select(2,1):fill(self.vocab:go())
   end
@@ -180,7 +178,7 @@ function seqProvider:reset()
     self.currentIndex = self.firstIndex
     if not self.preprocess then
         self.data:seek("set")
-        for i=1, self.firstIndex do
+        for i=1, self.firstIndex-1 do
           self.data:read('*l')
         end
     end
