@@ -34,16 +34,19 @@ else
     classifier = nn.Linear(opt.rnnSize, decodedSeq.vocab:size())
 end
 
+function getEmbedder(m)
+  return m:findModules('nn.LookupTable')[1]
+end
+getEmbedder(recurrentEncoder):share(getEmbedder(recurrentDecoder), 'weight','gradWeight')
 --tie classification and embedding weights
 classifier:share(recurrentDecoder:findModules('nn.LookupTable')[1], 'weight','gradWeight')
 
 function zeroPadWeights(m, padIdx)
-  local lookuptbl = m:findModules('nn.LookupTable')[1]
+  local lookuptbl = getEmbedder(m)
   lookuptbl.paddingValue = padIdx
   lookuptbl.weight[padIdx]:zero()
 end
 
-zeroPadWeights(recurrentEncoder, encodedSeq.vocab:pad())
 zeroPadWeights(recurrentDecoder, decodedSeq.vocab:pad())
 local criterion = nn.CrossEntropyCriterion():type(opt.tensorType)
 
@@ -171,7 +174,7 @@ repeat
     print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},"the following were among yesterday 's offerings and pricings in the u.s. and non-u.s. capital markets"))
     print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'nothing could be further from the truth'))
     print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'Are you one of millions out there who are trying to learn foreign language, but never have enough time?'))
-
+    print('\nSampled Text:\n' .. sample({enc, encodedSeq.vocab}, {sampledDec, decodedSeq.vocab},'its a small quiet town , the kind where everyone knows your name .'))
     local LossTrain = seq2seq:learn(encodedSeq,{decodedSeq})
     saveModel(epoch)
 
