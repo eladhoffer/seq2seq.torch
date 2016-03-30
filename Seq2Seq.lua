@@ -14,7 +14,6 @@ function Seq2Seq:__init(...)
   {arg='batchSize', type='number', help='batch size used', default = 32},
   {arg='criterion', type='userdata', help='criterion used to evaluate', default = nn.CrossEntropyCriterion()},
   {arg='optimFunc', type='function', help='optimization function', default = optim.adam},
-  {arg='padValue', type='number', help='pad value to ignore in training', default = 0},
   {arg='optimState', type='table', help='optimization config', default = {}}
   )
   self.batchSize = args.batchSize
@@ -25,7 +24,6 @@ function Seq2Seq:__init(...)
   self.decoderModels = {}
   self.criterion = args.criterion
   self.modules = {}
-  self.padValue = args.padValue
   parent.add(self, self.encoderModel)
 end
 
@@ -72,7 +70,7 @@ end
 function Seq2Seq:evaluate(encodedSeq, decodedSeqs, train)
     -- input is of form {data, model, vocab}, {data, model, vocab},...
     -- data is ordered batches X batchSize X smpLength
-    local seqCriterion = nn.MaskPaddingCriterion(self.criterion, self.padValue)
+    local seqCriterion = nn.MaskPaddingCriterion(self.criterion)
     local shuffle = false
     if train then
       shuffle = encodedSeq.preprocess
@@ -119,10 +117,10 @@ function Seq2Seq:evaluate(encodedSeq, decodedSeqs, train)
 
 
       for m = 1, #self.decoderModels do
+        seqCriterion:setPadding(decodedSeqs[m].vocab:pad())
         currLoss = seqCriterion:forward(y[m],yt[m])
         lossVals[m] = lossVals[m] + currLoss --/ self.maxLength
       end
-    --  print(currLoss)
       ----Training -> backpropagation
       if train then
         local weights, gradients = unpack(self.params)
@@ -131,6 +129,7 @@ function Seq2Seq:evaluate(encodedSeq, decodedSeqs, train)
           self:zeroGradParameters()
           local dE_dy = {}
           for m = 1, #self.decoderModels do
+            seqCriterion:setPadding(decodedSeqs[m].vocab:pad())
             dE_dy[m] = seqCriterion:backward(y[m],yt[m])
             dE_dy[m]:cmul(yt[m]:ne(0):view(yt[m]:size(1),yt[m]:size(2), 1):expandAs(dE_dy[m]))
             --print('dE')

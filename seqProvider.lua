@@ -183,3 +183,7 @@ function seqProvider:reset()
         end
     end
 end
+
+function seqProvider:getVocab()
+  return vocab
+end

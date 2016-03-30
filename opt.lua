@@ -70,7 +70,7 @@ local types = {
 }
 
 opt.tensorType = types[opt.type] or 'torch.FloatTensor'
-function buildEncDec(vocabSize, reverse)
+function buildRNN(vocabSize, reverse)
   local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
   local rnn = rnnTypes[opt.model]
   local hiddenSize = opt.embeddingSize
@@ -80,6 +80,20 @@ function buildEncDec(vocabSize, reverse)
   end
   for i=1, opt.numLayers do
     recEncDec:add(rnn(opt.rnnSize, opt.rnnSize, opt.initWeight))
+    if opt.dropout > 0 then
+      recEncDec:add(nn.Dropout(opt.dropout))
+    end
+  end
+  return recEncDec
+end
+require 'nnx'
+function buildBiDiRNN(vocabSize)
+  local rnnTypes = {LSTM = nn.LSTM, RNN = nn.RNN, GRU = nn.GRU, iRNN = nn.iRNN}
+  local rnn = rnnTypes[opt.model]
+  local hiddenSize = opt.embeddingSize
+  recEncDec = nn.Sequential():add(nn.LookupTable(vocabSize, opt.rnnSize)):add(nn.Probe())
+  for i=1, opt.numLayers do
+    recEncDec:add(nn.Bidirectional(rnn(opt.rnnSize, opt.rnnSize / 2, opt.initWeight)))
     if opt.dropout > 0 then
       recEncDec:add(nn.Dropout(opt.dropout))
     end

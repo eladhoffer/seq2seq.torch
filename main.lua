@@ -33,8 +33,8 @@ if paths.filep(opt.load) then
     recurrentDecoder = modelConfig.recurrentDecoder
     classifier = modelConfig.classifier
 else
-    recurrentEncoder = buildEncDec(encodedSeq.vocab:size(), true)
-    recurrentDecoder = buildEncDec(decodedSeq.vocab:size(), false)
+    recurrentEncoder = buildRNN(encodedSeq.vocab:size(), true)
+    recurrentDecoder = buildRNN(decodedSeq.vocab:size(), false)
     classifier = nn.Linear(opt.rnnSize, decodedSeq.vocab:size())
 end
 
